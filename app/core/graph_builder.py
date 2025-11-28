@@ -1,21 +1,28 @@
 import os
+import re
 import osmnx as ox
 
-def get_graph(place_name, filepath):
+def get_graph(place_name):
     """
-    Checks if a graph file exists. If yes, loads it.
-    If no, downloads it from OSM, saves it, and returns it.
+    Downloads graph for a place_name and caches it.
+    Generates a filename automatically from the place name.
     """
+    # Create a safe filename (e.g., "New York, NY" -> "new_york_ny.graphml")
+    safe_name = re.sub(r'[^a-zA-Z0-9]', '_', place_name.lower())
+    filename = f"{safe_name}.graphml"
+    folder = "data/processed"
+    filepath = os.path.join(folder, filename)
+
+    # Ensure folder exists
+    os.makedirs(folder, exist_ok=True)
+
     if os.path.exists(filepath):
-        print(f"Loading graph from {filepath}...")
-        # Load the graph from the GraphML file
-        graph = ox.load_graphml(filepath)
+        print(f"Loading cached graph for {place_name}...")
+        return ox.load_graphml(filepath)
     else:
-        print(f"Graph file not found. Downloading {place_name} from OSM...")
-        # Download the walking network (streets + paths)
+        print(f"Downloading graph for {place_name} (this may take time)...")
+        # Simplify=True removes curvy geometry nodes to make the graph smaller/faster
         graph = ox.graph_from_place(place_name, network_type='walk')
-        
-        print(f"Saving graph to {filepath}...")
+        print(f"Saving to {filepath}...")
         ox.save_graphml(graph, filepath)
-        
-    return graph
+        return graph

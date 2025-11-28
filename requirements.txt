@@ -3,3 +3,6 @@ networkx>=3.0
 scikit-learn
 pandas
 geopandas
+fastapi
+uvicorn
+jinja2
