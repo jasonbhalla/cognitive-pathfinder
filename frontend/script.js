@@ -1,53 +1,35 @@
-// 1. Initialize Map
-var map = L.map('map', {
-    renderer: L.canvas() // IMPORTANT: Use Canvas for performance with many lines
-}).setView([40.745, -74.03], 15);
+var map = L.map('map', { renderer: L.canvas() }).setView([40.735, -74.03], 14);
+var tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
-// 2. Layers
-// The Standard Map Tiles
-var tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '© OpenStreetMap'
-}).addTo(map);
+var graphLayer = L.layerGroup();
+var routeLayer = L.layerGroup().addTo(map);
+var startMarker = null, endMarker = null, selectionMode = 'start', graphLoaded = false;
 
-// Layer Groups for Graph visualization
-var graphEdgesLayer = L.layerGroup();
-var graphNodesLayer = L.layerGroup();
-var routeLayer = L.layerGroup().addTo(map); // Route always shows
-
-var startMarker = null;
-var endMarker = null;
-var selectionMode = 'start';
-var graphLoaded = false; // Flag to check if we already fetched graph data
-
-// 3. Toggle Logic
+// --- VISUALIZATION LOGIC ---
 async function toggleGraphView() {
     var isGraphMode = document.getElementById('graphToggle').checked;
     
     if (isGraphMode) {
-        // Switch to Graph Mode
         document.getElementById('body').classList.add('graph-mode');
-        map.removeLayer(tileLayer); // Hide tiles
         
-        if (!graphLoaded) {
-            await loadGraphData();
-        }
+        // Load data if not already present
+        if (!graphLoaded) await loadGraphData();
         
-        map.addLayer(graphEdgesLayer);
-        map.addLayer(graphNodesLayer);
+        map.addLayer(graphLayer);
+        
+        // Dim the tile layer instead of removing it
+        tileLayer.setOpacity(0.1); 
         
     } else {
-        // Switch to Map Mode
         document.getElementById('body').classList.remove('graph-mode');
-        map.addLayer(tileLayer); // Show tiles
-        map.removeLayer(graphEdgesLayer);
-        map.removeLayer(graphNodesLayer);
+        map.removeLayer(graphLayer);
+        tileLayer.setOpacity(1.0);
     }
 }
 
 async function loadGraphData() {
     var city = document.getElementById('cityInput').value;
-    document.getElementById('loading').innerText = "Downloading full graph geometry...";
+    document.getElementById('loading').innerText = "Fetching graph visual...";
     document.getElementById('loading').style.display = 'block';
 
     try {
@@ -56,52 +38,63 @@ async function loadGraphData() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ city: city })
         });
+        
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Server Error ${response.status}: ${errText}`);
+        }
+
         const data = await response.json();
+        
+        // Draw Edges
+        if (data.edges) {
+            data.edges.forEach(segment => {
+                L.polyline(segment.coords, { 
+                    color: segment.color, 
+                    weight: 1, 
+                    opacity: 0.7, 
+                    interactive: false 
+                }).addTo(graphLayer);
+            });
+        }
 
-        // Draw Edges (Grey Lines)
-        // Using a light grey color so it looks like a wireframe on black background
-        data.edges.forEach(segment => {
-            L.polyline(segment, {
-                color: '#555', // Dark Grey
-                weight: 1,
-                opacity: 0.5,
-                interactive: false // Disable clicking on generic edges for speed
-            }).addTo(graphEdgesLayer);
-        });
-
-        // Draw Nodes (Small Dots)
-        data.nodes.forEach(coords => {
-            L.circleMarker(coords, {
-                radius: 1, // Very small dot
-                color: '#888',
-                fillColor: '#fff',
-                fillOpacity: 0.8,
-                interactive: false
-            }).addTo(graphNodesLayer);
-        });
+        // Draw Nodes (Vertices)
+        if (data.nodes) {
+            data.nodes.forEach(coord => {
+                L.circleMarker(coord, {
+                    radius: 2,
+                    color: '#ffffff',
+                    fillColor: '#ffffff',
+                    fillOpacity: 1,
+                    interactive: false
+                }).addTo(graphLayer);
+            });
+        }
 
         graphLoaded = true;
+
     } catch (e) {
-        alert("Error loading graph visual: " + e);
+        console.error(e);
+        alert("Graph Visual Error: " + e.message);
     } finally {
         document.getElementById('loading').style.display = 'none';
     }
 }
 
-// 4. Interaction Logic (Markers)
+// --- CLICK HANDLER ---
 map.on('click', function(e) {
-    var lat = e.latlng.lat;
-    var lng = e.latlng.lng;
+    var lat = e.latlng.lat.toFixed(5);
+    var lng = e.latlng.lng.toFixed(5);
 
     if (selectionMode === 'start') {
         if (startMarker) map.removeLayer(startMarker);
         startMarker = L.marker([lat, lng], {color: 'green'}).addTo(map).bindPopup("Start").openPopup();
-        document.getElementById('startInput').value = lat.toFixed(5) + ", " + lng.toFixed(5);
+        document.getElementById('startInput').value = lat + ", " + lng;
         selectionMode = 'end';
     } else {
         if (endMarker) map.removeLayer(endMarker);
         endMarker = L.marker([lat, lng], {icon: getRedIcon()}).addTo(map).bindPopup("End").openPopup();
-        document.getElementById('endInput').value = lat.toFixed(5) + ", " + lng.toFixed(5);
+        document.getElementById('endInput').value = lat + ", " + lng;
         selectionMode = 'start';
     }
 });
@@ -117,7 +110,7 @@ function getRedIcon() {
     });
 }
 
-// 5. Routing Logic
+// --- FIND ROUTE ---
 async function findRoute() {
     var city = document.getElementById('cityInput').value;
     var startVal = document.getElementById('startInput').value;
@@ -125,11 +118,10 @@ async function findRoute() {
 
     if (!city || !startVal || !endVal) { alert("Please select start/end points"); return; }
     
-    // Check if city changed, if so, invalidate graph cache
-    // (Simplification: for now we assume city doesn't change mid-session for the visualizer)
-
-    var [startLat, startLon] = startVal.split(',').map(s => parseFloat(s));
-    var [endLat, endLon] = endVal.split(',').map(s => parseFloat(s));
+    try {
+        var [startLat, startLon] = startVal.split(',').map(s => parseFloat(s));
+        var [endLat, endLon] = endVal.split(',').map(s => parseFloat(s));
+    } catch (e) { alert("Invalid coordinates"); return; }
 
     document.getElementById('loading').innerText = "Calculating path...";
     document.getElementById('loading').style.display = 'block';
@@ -139,29 +131,40 @@ async function findRoute() {
         const response = await fetch('/api/route', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ city, start_lat: startLat, start_lon: startLon, end_lat: endLat, end_lon: endLon })
+            body: JSON.stringify({ 
+                city, 
+                start_lat: startLat, start_lon: startLon, 
+                end_lat: endLat, end_lon: endLon 
+            })
         });
+
+        if (!response.ok) {
+            const errText = await response.json();
+            throw new Error(errText.detail || "Server Error");
+        }
+
         const data = await response.json();
 
-        if (response.ok) {
-            // Draw Route (Neon Cyan for visibility on both maps)
-            var polyline = L.polyline(data.path, {
-                color: '#00FFFF', // Cyan/Neon Blue
-                weight: 5,
-                opacity: 0.9
-            }).addTo(routeLayer);
+        if (data.segments) {
+            data.segments.forEach(seg => {
+                L.polyline(seg.coords, {
+                    color: seg.color,
+                    weight: 6,
+                    opacity: 1.0
+                }).addTo(routeLayer);
+            });
             
-            map.fitBounds(polyline.getBounds());
-            
-            document.getElementById('distVal').innerText = data.distance;
-            document.getElementById('nodesVal').innerText = data.node_count;
-            document.getElementById('stats').style.display = 'block';
-        } else {
-            alert(data.detail);
+            var allPoints = data.segments.flatMap(s => s.coords);
+            if(allPoints.length > 0) map.fitBounds(L.polyline(allPoints).getBounds());
         }
+        
+        document.getElementById('distVal').innerText = data.time_minutes + " mins";
+        document.getElementById('nodesVal').innerText = data.node_count;
+        document.getElementById('stats').style.display = 'block';
+
     } catch (e) {
         console.error(e);
-        alert("Server Error");
+        alert("Route Error: " + e.message);
     } finally {
         document.getElementById('loading').style.display = 'none';
     }

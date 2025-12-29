@@ -1,8 +1,9 @@
+fastapi
+uvicorn
+jinja2
 osmnx>=1.9.0
 networkx>=3.0
 scikit-learn
 pandas
 geopandas
-fastapi
-uvicorn
-jinja2
+requests

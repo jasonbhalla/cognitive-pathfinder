@@ -10,12 +10,18 @@
         
         /* Layout */
         #sidebar { width: 320px; padding: 25px; background: #ffffff; box-shadow: 2px 0 10px rgba(0,0,0,0.1); z-index: 1000; display: flex; flex-direction: column; gap: 10px;}
-        #map { flex-grow: 1; background: #ddd; } /* Default map bg */
+        #map { flex-grow: 1; background: #ddd; }
         
-        /* Graph Mode Styles (Black Background) */
-        .graph-mode #map { background: #111 !important; }
+        /* --- Graph Mode Styles --- */
+        .graph-mode #map { 
+            background-color: #000000 !important; 
+        }
+        /* Dim the map tiles when graph mode is active */
+        .graph-mode .leaflet-tile-pane {
+            opacity: 0.1 !important;
+            filter: grayscale(100%) invert(100%);
+        }
 
-        /* UI Elements */
         h2 { margin-top: 0; color: #333; }
         label { font-weight: 600; font-size: 0.9em; margin-top: 10px; display: block;}
         input[type="text"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
@@ -24,7 +30,6 @@
         .btn-primary { background: #4285F4; color: white; }
         .btn-primary:hover { background: #357ae8; }
         
-        /* Toggle Switch container */
         .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding: 10px; background: #f0f0f0; border-radius: 5px;}
         .toggle-label { margin: 0; font-size: 0.9em; }
         
@@ -38,18 +43,18 @@
         <h2>Cognitive Pathfinder</h2>
         
         <div class="toggle-container">
-            <span class="toggle-label">Show Graph Structure</span>
+            <span class="toggle-label">Show Graph</span>
             <input type="checkbox" id="graphToggle" onchange="toggleGraphView()">
         </div>
 
         <label>City / Area</label>
         <input type="text" id="cityInput" value="Hoboken, New Jersey, USA">
         
-        <label>Start Coordinates</label>
-        <input type="text" id="startInput" placeholder="Click on map">
+        <label>Start (Click Map)</label>
+        <input type="text" id="startInput" placeholder="Lat, Lon">
         
-        <label>End Coordinates</label>
-        <input type="text" id="endInput" placeholder="Click on map">
+        <label>End (Click Map)</label>
+        <input type="text" id="endInput" placeholder="Lat, Lon">
 
         <button class="btn-primary" onclick="findRoute()">Find Optimal Path</button>
         
@@ -57,8 +62,8 @@
         
         <div id="stats" class="stats">
             <h3 style="margin-top:0;">Route Stats</h3>
-            <p>Distance: <strong id="distVal"></strong> m</p>
-            <p>Nodes Visited: <strong id="nodesVal"></strong></p>
+            <p>Time: <strong id="distVal"></strong></p>
+            <p>Nodes: <strong id="nodesVal"></strong></p>
         </div>
     </div>
 
