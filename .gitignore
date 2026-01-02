@@ -184,3 +184,4 @@ data/processed/*
 # ...But keep the folder structures in git (requires .gitkeep files)
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+app/.DS_Store

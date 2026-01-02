@@ -8,19 +8,22 @@
     <style>
         body { margin: 0; font-family: 'Segoe UI', sans-serif; display: flex; height: 100vh; }
         
-        /* Layout */
-        #sidebar { width: 320px; padding: 25px; background: #ffffff; box-shadow: 2px 0 10px rgba(0,0,0,0.1); z-index: 1000; display: flex; flex-direction: column; gap: 10px;}
+        #sidebar { 
+            width: 320px; 
+            padding: 25px; 
+            background: #ffffff; 
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1); 
+            z-index: 1000; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 10px;
+            overflow-y: auto; 
+        }
+
         #map { flex-grow: 1; background: #ddd; }
         
-        /* --- Graph Mode Styles --- */
-        .graph-mode #map { 
-            background-color: #000000 !important; 
-        }
-        /* Dim the map tiles when graph mode is active */
-        .graph-mode .leaflet-tile-pane {
-            opacity: 0.1 !important;
-            filter: grayscale(100%) invert(100%);
-        }
+        .graph-mode #map { background-color: #000000 !important; }
+        .graph-mode .leaflet-tile-pane { opacity: 0.1 !important; filter: grayscale(100%) invert(100%); }
 
         h2 { margin-top: 0; color: #333; }
         label { font-weight: 600; font-size: 0.9em; margin-top: 10px; display: block;}
@@ -35,6 +38,22 @@
         
         .stats { margin-top: 20px; padding: 15px; background: #e8f0fe; border-radius: 5px; border: 1px solid #4285f4; display: none;}
         .loading { font-style: italic; color: #666; display: none; margin-top: 10px;}
+
+        /* TERMINAL LOGS */
+        #terminal {
+            margin-top: 20px;
+            background: #1e1e1e;
+            color: #00ff00;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8em;
+            padding: 10px;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            border: 1px solid #333;
+        }
+        .log-entry { margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 2px; }
     </style>
 </head>
 <body id="body">
@@ -65,11 +84,14 @@
             <p>Time: <strong id="distVal"></strong></p>
             <p>Nodes: <strong id="nodesVal"></strong></p>
         </div>
+
+        <label>System Logs</label>
+        <div id="terminal">Connecting to backend...</div>
     </div>
 
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="/static/script.js"></script>
+    <script src="/static/script.js?v=2"></script>
 </body>
 </html>

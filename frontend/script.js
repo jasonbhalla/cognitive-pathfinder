@@ -5,21 +5,65 @@ var graphLayer = L.layerGroup();
 var routeLayer = L.layerGroup().addTo(map);
 var startMarker = null, endMarker = null, selectionMode = 'start', graphLoaded = false;
 
+// --- LOGGING SYSTEM ---
+console.log("Starting Log Poller...");
+setInterval(fetchLogs, 1000); // Run every second
+
+async function fetchLogs() {
+    try {
+        const response = await fetch('/api/logs?t=' + new Date().getTime());
+        if (!response.ok) return;
+
+        const data = await response.json();
+        const terminal = document.getElementById('terminal');
+
+        if (data.logs && data.logs.length > 0) {
+            
+            // SMART SCROLL LOGIC
+            // Check if user is currently at the bottom (with 20px buffer)
+            const isScrolledToBottom = terminal.scrollHeight - terminal.scrollTop <= terminal.clientHeight + 20;
+
+            const html = data.logs.map(line => 
+                `<div class="log-entry">${escapeHtml(line)}</div>`
+            ).join('');
+            
+            // Only update DOM if changed
+            if (terminal.innerHTML !== html) {
+                terminal.innerHTML = html;
+                
+                // Only auto-scroll if the user was ALREADY at the bottom
+                if (isScrolledToBottom) {
+                    terminal.scrollTop = terminal.scrollHeight;
+                }
+            }
+        } else {
+             if (terminal.innerText.includes("Connecting")) {
+                 terminal.innerText = "Connected. Waiting for activity...";
+             }
+        }
+    } catch (e) {
+        console.error("Poll error:", e);
+    }
+}
+
+function escapeHtml(text) {
+    if (!text) return "";
+    return text.replace(/&/g, "&amp;")
+               .replace(/</g, "&lt;")
+               .replace(/>/g, "&gt;")
+               .replace(/"/g, "&quot;")
+               .replace(/'/g, "&#039;");
+}
+
 // --- VISUALIZATION LOGIC ---
 async function toggleGraphView() {
     var isGraphMode = document.getElementById('graphToggle').checked;
     
     if (isGraphMode) {
         document.getElementById('body').classList.add('graph-mode');
-        
-        // Load data if not already present
         if (!graphLoaded) await loadGraphData();
-        
         map.addLayer(graphLayer);
-        
-        // Dim the tile layer instead of removing it
         tileLayer.setOpacity(0.1); 
-        
     } else {
         document.getElementById('body').classList.remove('graph-mode');
         map.removeLayer(graphLayer);
@@ -46,7 +90,6 @@ async function loadGraphData() {
 
         const data = await response.json();
         
-        // Draw Edges
         if (data.edges) {
             data.edges.forEach(segment => {
                 L.polyline(segment.coords, { 
@@ -58,7 +101,6 @@ async function loadGraphData() {
             });
         }
 
-        // Draw Nodes (Vertices)
         if (data.nodes) {
             data.nodes.forEach(coord => {
                 L.circleMarker(coord, {
@@ -70,9 +112,7 @@ async function loadGraphData() {
                 }).addTo(graphLayer);
             });
         }
-
         graphLoaded = true;
-
     } catch (e) {
         console.error(e);
         alert("Graph Visual Error: " + e.message);
