@@ -7,7 +7,7 @@ var startMarker = null, endMarker = null, selectionMode = 'start', graphLoaded =
 
 // --- LOGGING SYSTEM ---
 console.log("Starting Log Poller...");
-setInterval(fetchLogs, 1000); // Run every second
+setInterval(fetchLogs, 1000); 
 
 async function fetchLogs() {
     try {
@@ -18,28 +18,15 @@ async function fetchLogs() {
         const terminal = document.getElementById('terminal');
 
         if (data.logs && data.logs.length > 0) {
-            
-            // SMART SCROLL LOGIC
-            // Check if user is currently at the bottom (with 20px buffer)
             const isScrolledToBottom = terminal.scrollHeight - terminal.scrollTop <= terminal.clientHeight + 20;
-
             const html = data.logs.map(line => 
                 `<div class="log-entry">${escapeHtml(line)}</div>`
             ).join('');
             
-            // Only update DOM if changed
             if (terminal.innerHTML !== html) {
                 terminal.innerHTML = html;
-                
-                // Only auto-scroll if the user was ALREADY at the bottom
-                if (isScrolledToBottom) {
-                    terminal.scrollTop = terminal.scrollHeight;
-                }
+                if (isScrolledToBottom) terminal.scrollTop = terminal.scrollHeight;
             }
-        } else {
-             if (terminal.innerText.includes("Connecting")) {
-                 terminal.innerText = "Connected. Waiting for activity...";
-             }
         }
     } catch (e) {
         console.error("Poll error:", e);
@@ -48,11 +35,7 @@ async function fetchLogs() {
 
 function escapeHtml(text) {
     if (!text) return "";
-    return text.replace(/&/g, "&amp;")
-               .replace(/</g, "&lt;")
-               .replace(/>/g, "&gt;")
-               .replace(/"/g, "&quot;")
-               .replace(/'/g, "&#039;");
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // --- VISUALIZATION LOGIC ---
@@ -61,7 +44,10 @@ async function toggleGraphView() {
     
     if (isGraphMode) {
         document.getElementById('body').classList.add('graph-mode');
-        if (!graphLoaded) await loadGraphData();
+        // Force reload every time toggle is checked to respect NEW map bounds
+        graphLayer.clearLayers(); 
+        await loadGraphData();
+        
         map.addLayer(graphLayer);
         tileLayer.setOpacity(0.1); 
     } else {
@@ -73,14 +59,27 @@ async function toggleGraphView() {
 
 async function loadGraphData() {
     var city = document.getElementById('cityInput').value;
-    document.getElementById('loading').innerText = "Fetching graph visual...";
+    document.getElementById('loading').innerText = "Fetching visible graph...";
     document.getElementById('loading').style.display = 'block';
+
+    // NEW: Get current map bounds to send to backend
+    var bounds = map.getBounds();
+    
+    var payload = {
+        city: city,
+        bounds: {
+            min_lat: bounds.getSouth(),
+            max_lat: bounds.getNorth(),
+            min_lon: bounds.getWest(),
+            max_lon: bounds.getEast()
+        }
+    };
 
     try {
         const response = await fetch('/api/graph-data', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ city: city })
+            body: JSON.stringify(payload)
         });
         
         if (!response.ok) {
@@ -112,7 +111,6 @@ async function loadGraphData() {
                 }).addTo(graphLayer);
             });
         }
-        graphLoaded = true;
     } catch (e) {
         console.error(e);
         alert("Graph Visual Error: " + e.message);

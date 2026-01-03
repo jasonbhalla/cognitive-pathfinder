@@ -185,3 +185,4 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 app/.DS_Store
+app/.DS_Store

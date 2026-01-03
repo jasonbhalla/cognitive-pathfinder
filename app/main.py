@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Set
 from app.core.graph_builder import get_fused_graph
 from app.core.pathfinder import find_shortest_path, get_path_segments
 
@@ -26,24 +26,13 @@ LOG_BUFFER = collections.deque(maxlen=100)
 original_print = builtins.print
 
 def custom_print(*args, **kwargs):
-    """
-    Replacer for the standard print() function.
-    1. Sends output to the real terminal.
-    2. Captures output for the UI.
-    """
-    # 1. Print to actual terminal
     original_print(*args, **kwargs)
-    
-    # 2. Capture for UI
     try:
         msg = " ".join(map(str, args))
         if not msg.strip(): return
-
-        # Add timestamp if missing
         if not msg.startswith(tuple(str(i) for i in range(10))):
             timestamp = datetime.now().strftime("%H:%M:%S")
             msg = f"{timestamp} - {msg}"
-            
         LOG_BUFFER.append(msg)
     except Exception:
         pass
@@ -53,7 +42,7 @@ builtins.print = custom_print
 def log_event(message: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     formatted_msg = f"{timestamp} - [{level}] - {message}"
-    print(formatted_msg) # Triggers custom_print
+    print(formatted_msg)
 
 # --- 3. SILENCE UVICORN SPAM ---
 class EndpointFilter(logging.Filter):
@@ -63,7 +52,6 @@ class EndpointFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 # --- 4. EXCEPTION HANDLERS ---
-
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body()
@@ -79,10 +67,16 @@ async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 # --- 5. DATA MODELS ---
+class BoundingBox(BaseModel):
+    min_lat: float
+    max_lat: float
+    min_lon: float
+    max_lon: float
 
 class GraphRequest(BaseModel):
     city: str
     gtfs_file: Optional[str] = None
+    bounds: Optional[BoundingBox] = None 
 
 class RouteRequest(BaseModel):
     city: str
@@ -104,53 +98,84 @@ def sanitize_json(data):
     return data
 
 # --- 7. ENDPOINTS ---
-
 @app.get("/api/logs")
 async def get_logs():
-    """Reads logs. Keeps 'async' because reading memory is fast."""
     return {"logs": list(LOG_BUFFER)}
 
 @app.post("/api/graph-data")
 def get_graph_geometry(request: GraphRequest):
-    """
-    REMOVED 'async': Now runs in a threadpool. 
-    This allows /api/logs to answer WHILE this function is downloading/processing.
-    """
     log_event(f"GRAPH REQUEST: {request.city}")
     try:
         graph = get_fused_graph(request.city)
         edges = []
         nodes = []
         
-        limit = 5000 
-        count = 0
-        
-        for u, v, data in graph.edges(data=True):
-            if count > limit: break
+        # 1. Calculate Buffered Bounds
+        if request.bounds:
+            lat_span = request.bounds.max_lat - request.bounds.min_lat
+            lon_span = request.bounds.max_lon - request.bounds.min_lon
+            buffer_lat = lat_span * 0.2
+            buffer_lon = lon_span * 0.2
             
-            coords = []
-            if 'geometry' in data:
-                coords = [(c[1], c[0]) for c in data['geometry'].coords]
-            else:
+            min_lat = request.bounds.min_lat - buffer_lat
+            max_lat = request.bounds.max_lat + buffer_lat
+            min_lon = request.bounds.min_lon - buffer_lon
+            max_lon = request.bounds.max_lon + buffer_lon
+        else:
+            min_lat, max_lat, min_lon, max_lon = -90, 90, -180, 180
+
+        active_node_ids = set()
+        
+        # 2. Filter Edges (Hard limit is okay here to prevent browser crash)
+        edge_limit = 20000 
+        count = 0
+
+        for u, v, data in graph.edges(data=True):
+            if count > edge_limit: break
+            
+            # Get coordinates
+            try:
                 n1 = graph.nodes[u]
                 n2 = graph.nodes[v]
-                coords = [(n1['y'], n1['x']), (n2['y'], n2['x'])]
+                y1, x1 = float(n1.get('y', 0)), float(n1.get('x', 0))
+                y2, x2 = float(n2.get('y', 0)), float(n2.get('x', 0))
+            except KeyError:
+                continue 
+                
+            # Visibility Check
+            u_visible = (min_lat < y1 < max_lat) and (min_lon < x1 < max_lon)
+            v_visible = (min_lat < y2 < max_lat) and (min_lon < x2 < max_lon)
+            
+            if not (u_visible or v_visible):
+                continue
+
+            # Add endpoints to active set
+            active_node_ids.add(u)
+            active_node_ids.add(v)
+
+            coords = []
+            if 'geometry' in data:
+                try:
+                    coords = [(p[1], p[0]) for p in data['geometry'].coords]
+                except AttributeError:
+                    coords = [(y1, x1), (y2, x2)]
+            else:
+                coords = [(y1, x1), (y2, x2)]
             
             edges.append({
                 "coords": coords,
                 "color": data.get('color', '#999')
             })
             count += 1
-
-        node_limit = 2000
-        node_count = 0
-        for n, data in graph.nodes(data=True):
-            if node_count > node_limit: break
-            nodes.append([data['y'], data['x']])
-            node_count += 1
+        
+        # 3. Fetch Nodes (NO LIMIT)
+        # FIX: We removed the limit here. If an edge is shown, its nodes MUST be shown.
+        for node_id in active_node_ids:
+            n_data = graph.nodes[node_id]
+            nodes.append([float(n_data.get('y')), float(n_data.get('x'))])
 
         response_data = {"edges": edges, "nodes": nodes}
-        log_event(f"Sending {len(edges)} edges and {len(nodes)} nodes to frontend.")
+        log_event(f"Sending {len(edges)} visible edges and {len(nodes)} connected nodes.")
         return sanitize_json(response_data)
 
     except Exception as e:
@@ -159,10 +184,6 @@ def get_graph_geometry(request: GraphRequest):
 
 @app.post("/api/route")
 def calculate_route(request: RouteRequest):
-    """
-    REMOVED 'async': Now runs in a threadpool. 
-    Allows real-time logging during heavy pathfinding.
-    """
     log_event(f"ROUTE REQUEST: {request.start_lat},{request.start_lon} -> {request.end_lat},{request.end_lon}")
     try:
         graph = get_fused_graph(request.city)
