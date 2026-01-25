@@ -1,120 +1,132 @@
-import pandas as pd
-import zipfile
 import os
 import requests
-import traceback
+import zipfile
+import pandas as pd
+import shutil
+from io import BytesIO
 
-# Registry
-GTFS_REGISTRY = {
-    "hoboken": "http://web.mta.info/developers/data/nyct/subway/google_transit.zip", 
-    "new york": "http://web.mta.info/developers/data/nyct/subway/google_transit.zip",
-    "manhattan": "http://web.mta.info/developers/data/nyct/subway/google_transit.zip"
+# --- REGISTRY ---
+# For now, I'm hard-coding certain cities with their data since I'm not sure if there's a good way to have it be universal and generalized for any city
+GTFS_FEEDS = {
+    'hoboken': ['https://data.trilliumtransit.com/gtfs/path-nj-us/path-nj-us.zip'],
+    'new york': [
+        # MTA New York City Transit (Subway)
+        'http://web.mta.info/developers/data/nyct/subway/google_transit.zip',
+        # PATH (Port Authority Trans-Hudson)
+        'https://data.trilliumtransit.com/gtfs/path-nj-us/path-nj-us.zip'
+    ],
+    'san francisco': ['https://gtfs.bart.gov/GTFS/google_transit.zip']
 }
 
 class GTFSLoader:
     def __init__(self, city_name):
         self.city_name = city_name.lower()
-        self.gtfs_path = f"data/raw/{self.city_name.replace(' ', '_')}_gtfs.zip"
-        self.stops = None
-        self.stop_times = None
-        
-    def _get_download_url(self):
-        for key, url in GTFS_REGISTRY.items():
+        self.feeds = []
+        for key, urls in GTFS_FEEDS.items():
             if key in self.city_name:
-                print(f"[GTFS] Match found in registry: '{key}' -> {url}")
-                return url
-        print(f"[GTFS] No auto-download URL found for '{self.city_name}' in registry.")
-        return None
-
-    def download_data(self):
-        os.makedirs("data/raw", exist_ok=True)
-
-        if os.path.exists(self.gtfs_path):
-            print(f"[GTFS] File already exists at {self.gtfs_path}. Skipping download.")
-            return True
-
-        url = self._get_download_url()
-        if not url: return False
-
-        print(f"[GTFS] Downloading from {url}...")
-        try:
-            # Added User-Agent to prevent 403 Forbidden errors
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            r = requests.get(url, stream=True, headers=headers)
-            r.raise_for_status()
-            with open(self.gtfs_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"[GTFS] Download complete. Saved to {self.gtfs_path}")
-            return True
-        except Exception as e:
-            print(f"[GTFS] Download FAILED: {e}")
-            return False
+                self.feeds = urls
+                break
+        
+        # Storing the combined data
+        self.stops = pd.DataFrame()
+        self.stop_times = pd.DataFrame()
+        self.trips = pd.DataFrame()
 
     def load_data(self):
-        has_data = self.download_data()
-        if not has_data:
-            # If no transit data is available
-            print("[GTFS] No data available. Routing will be walk-only.")
-            return
+        """Downloads and merges ALL feeds for the city."""
+        if not self.feeds:
+            raise FileNotFoundError(f"No GTFS registry entry for {self.city_name}")
 
-        print(f"[GTFS] Parsing zip file: {self.gtfs_path}...")
-        try:
-            with zipfile.ZipFile(self.gtfs_path) as z:
-                files = z.namelist()
-                stops_file = next((f for f in files if 'stops.txt' in f), None)
-                times_file = next((f for f in files if 'stop_times.txt' in f), None)
-                
-                if not stops_file or not times_file:
-                    print("[GTFS] Critical files missing in zip.")
-                    return
+        all_stops = []
+        all_stop_times = []
+        all_trips = []
 
-                self.stops = pd.read_csv(z.open(stops_file))
-                self.stop_times = pd.read_csv(z.open(times_file))
+        for i, url in enumerate(self.feeds):
+            print(f"[GTFS] Processing Feed {i+1}/{len(self.feeds)}: {url}")
+            try:
+                # 1. Download
+                response = requests.get(url)
+                if response.status_code != 200:
+                    print(f"[GTFS] Failed to download {url}")
+                    continue
                 
-                self.stops.columns = self.stops.columns.str.strip()
-                self.stop_times.columns = self.stop_times.columns.str.strip()
+                zip_file = zipfile.ZipFile(BytesIO(response.content))
                 
-                if 'stop_lat' in self.stops.columns:
-                    self.stops.rename(columns={'stop_lat': 'lat', 'stop_lon': 'lon'}, inplace=True)
+                # 2. Extract to Pandas (in memory)
+                # Prefix IDs with the feed index (0_, 1_) to prevent collisions
+                # e.g. If both feeds have stop_id "1", they become "0_1" and "1_1".
+                prefix = f"{i}_"
                 
-                self.stops = self.stops[['stop_id', 'stop_name', 'lat', 'lon']].copy()
-                self.stop_times = self.stop_times[['trip_id', 'stop_id', 'departure_time', 'stop_sequence', 'arrival_time']].copy()
-                
-                # Limiting to 50,000 for now
-                if len(self.stop_times) > 50000:
-                    self.stop_times = self.stop_times.head(50000)
+                # STOPS
+                with zip_file.open('stops.txt') as f:
+                    df_stops = pd.read_csv(f)
+                    df_stops['stop_id'] = prefix + df_stops['stop_id'].astype(str)
+                    # Standardize columns
+                    if 'stop_lat' in df_stops.columns:
+                        df_stops = df_stops.rename(columns={'stop_lat': 'lat', 'stop_lon': 'lon'})
+                    all_stops.append(df_stops[['stop_id', 'lat', 'lon']])
 
-                print(f"[GTFS] Loaded {len(self.stops)} stops and {len(self.stop_times)} scheduled times.")
-                
-        except Exception as e:
-            print(f"[GTFS] Error parsing zip: {e}")
-            traceback.print_exc()
+                # TRIPS
+                with zip_file.open('trips.txt') as f:
+                    df_trips = pd.read_csv(f)
+                    df_trips['trip_id'] = prefix + df_trips['trip_id'].astype(str)
+                    df_trips['route_id'] = prefix + df_trips['route_id'].astype(str)
+                    all_trips.append(df_trips)
+
+                # STOP TIMES
+                with zip_file.open('stop_times.txt') as f:
+                    df_st = pd.read_csv(f)
+                    df_st['trip_id'] = prefix + df_st['trip_id'].astype(str)
+                    df_st['stop_id'] = prefix + df_st['stop_id'].astype(str)
+                    
+                    # Optimization: Only keep what we need
+                    all_stop_times.append(df_st[['trip_id', 'stop_id', 'arrival_time', 'stop_sequence']])
+                    
+            except Exception as e:
+                print(f"[GTFS] Error processing feed {url}: {e}")
+
+        # 3. Merge
+        if all_stops:
+            self.stops = pd.concat(all_stops, ignore_index=True)
+            self.trips = pd.concat(all_trips, ignore_index=True)
+            self.stop_times = pd.concat(all_stop_times, ignore_index=True)
+            
+            print(f"[GTFS] Merged Data: {len(self.stops)} stops, {len(self.stop_times)} schedules.")
+        else:
+            raise Exception("No GTFS data could be loaded.")
 
     def get_transit_edges(self):
-        if self.stops is None: return []
-        
-        print("[GTFS] Calculating average travel times between stations...")
-        st = self.stop_times.sort_values(['trip_id', 'stop_sequence'])
-        
-        st['next_stop_id'] = st.groupby('trip_id')['stop_id'].shift(-1)
-        st['next_arrival_time'] = st.groupby('trip_id')['arrival_time'].shift(-1)
-        
-        edges = st.dropna(subset=['next_stop_id']).copy()
+        """
+        Calculates edges between stops based on trip schedules.
+        Returns: List of dicts {'stop_id', 'next_stop_id', 'duration'}
+        """
+        if self.stop_times.empty: return []
 
-        def time_to_min(t_str):
-            try:
-                if pd.isna(t_str): return 0
-                parts = list(map(int, t_str.split(':')))
-                return parts[0] * 60 + parts[1] + parts[2] / 60
-            except:
-                return 0
-
-        edges['dep_min'] = edges['departure_time'].apply(time_to_min)
-        edges['arr_min'] = edges['next_arrival_time'].apply(time_to_min)
-        edges['duration'] = edges['arr_min'] - edges['dep_min']
+        # Sort by trip and sequence
+        print("[GTFS] Sorting schedules...")
+        df = self.stop_times.sort_values(['trip_id', 'stop_sequence'])
         
-        valid_edges = edges[(edges['duration'] > 0) & (edges['duration'] < 120)]
+        # Shift to get next stop
+        df['next_stop_id'] = df.groupby('trip_id')['stop_id'].shift(-1)
+        df['next_arrival'] = df.groupby('trip_id')['arrival_time'].shift(-1)
         
-        summary = valid_edges.groupby(['stop_id', 'next_stop_id'])['duration'].mean().reset_index()
-        return summary.to_dict('records')
+        # Drop last stops
+        df = df.dropna(subset=['next_stop_id'])
+        
+        # Calculate duration (simplified for now)
+        # In the future I want to parse "HH:MM:SS", but for now I just take the average.
+        # Grouping by the edge (u, v) and count frequencies.
+        
+        # Assuming a standard 2-minute time
+        
+        edges = []
+        unique_links = df[['stop_id', 'next_stop_id']].drop_duplicates()
+        
+        for _, row in unique_links.iterrows():
+            edges.append({
+                'stop_id': row['stop_id'],
+                'next_stop_id': row['next_stop_id'],
+                'duration': 2.0 # Default 2 mins between stops
+            })
+            
+        return edges

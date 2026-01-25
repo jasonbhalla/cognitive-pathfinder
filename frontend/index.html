@@ -23,7 +23,7 @@
         #map { flex-grow: 1; background: #ddd; }
         
         .graph-mode #map { background-color: #000000 !important; }
-        .graph-mode .leaflet-tile-pane { opacity: 0.1 !important; filter: grayscale(100%) invert(100%); }
+        .graph-mode .leaflet-tile-pane { opacity: 0.5 !important; filter: grayscale(100%) invert(100%); }
 
         h2 { margin-top: 0; color: #333; }
         label { font-weight: 600; font-size: 0.9em; margin-top: 10px; display: block;}
@@ -32,6 +32,9 @@
         button { width: 100%; padding: 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px; transition: background 0.2s; }
         .btn-primary { background: #4285F4; color: white; }
         .btn-primary:hover { background: #357ae8; }
+        
+        .btn-secondary { background: #333; color: white; display: none; } /* Hidden by default */
+        .btn-secondary:hover { background: #555; }
         
         .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding: 10px; background: #f0f0f0; border-radius: 5px;}
         .toggle-label { margin: 0; font-size: 0.9em; }
@@ -65,6 +68,10 @@
             <span class="toggle-label">Show Graph</span>
             <input type="checkbox" id="graphToggle" onchange="toggleGraphView()">
         </div>
+        
+        <button id="refreshBtn" class="btn-secondary" onclick="loadWalkingLayer()">
+            Refresh Graph Area
+        </button>
 
         <label>City / Area</label>
         <input type="text" id="cityInput" value="New York, New York, USA">
@@ -92,6 +99,6 @@
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="/static/script.js?v=3"></script>
+    <script src="/static/script.js?v=5"></script>
 </body>
 </html>

@@ -35,38 +35,38 @@ function escapeHtml(text) {
 // --- VISUALIZATION CONTROLLER ---
 async function toggleGraphView() {
     var isGraphMode = document.getElementById('graphToggle').checked;
+    var refreshBtn = document.getElementById('refreshBtn');
     
     if (isGraphMode) {
         document.getElementById('body').classList.add('graph-mode');
+        refreshBtn.style.display = 'block'; // Show Refresh Button
+        
         map.addLayer(walkingLayer);
         map.addLayer(transitLayer);
-        tileLayer.setOpacity(0.1); 
+        tileLayer.setOpacity(0.5); 
         
-        // 1. Load Transit ONCE (Global)
         if (!transitLoaded) {
             await loadTransitLayer();
             transitLoaded = true;
         }
 
-        // 2. Load Walking NOW (Local)
+        // Initial load only. No auto-refresh on move.
         await loadWalkingLayer();
-
-        // 3. Listen for moves to reload walking
-        map.on('moveend', loadWalkingLayer);
 
     } else {
         document.getElementById('body').classList.remove('graph-mode');
+        refreshBtn.style.display = 'none'; // Hide Refresh Button
+        
         map.removeLayer(walkingLayer);
         map.removeLayer(transitLayer);
         tileLayer.setOpacity(1.0);
-        map.off('moveend', loadWalkingLayer);
     }
 }
 
-// --- LAYER 1: TRANSIT (Global) ---
+// --- LAYER 1: SUBWAY (Global) ---
 async function loadTransitLayer() {
     var city = document.getElementById('cityInput').value;
-    console.log("Loading Transit Layer...");
+    console.log("Loading Subway Layer...");
     
     try {
         const res = await fetch('/api/layers/transit', {
@@ -76,13 +76,12 @@ async function loadTransitLayer() {
         });
         const data = await res.json();
         
-        // Render Red/Black lines on top
         if (data.edges) {
             data.edges.forEach(e => {
                 L.polyline(e.coords, { 
                     color: e.color, 
-                    weight: 3, // Thicker
-                    opacity: 1.0,
+                    weight: 1.5, // Thin
+                    opacity: 0.8,
                     interactive: false 
                 }).addTo(transitLayer);
             });
@@ -90,7 +89,7 @@ async function loadTransitLayer() {
         if (data.nodes) {
             data.nodes.forEach(n => {
                 L.circleMarker(n, {
-                    radius: 4, // Bigger dots
+                    radius: 2, // Small
                     color: '#fff',
                     fillColor: '#ff3333',
                     fillOpacity: 1,
@@ -125,24 +124,22 @@ async function loadWalkingLayer() {
         });
         const data = await res.json();
         
-        walkingLayer.clearLayers(); // Clear old viewport data
+        walkingLayer.clearLayers();
         
         if (data.edges) {
             data.edges.forEach(e => {
                 L.polyline(e.coords, { 
                     color: '#3388ff', 
-                    weight: 1, // Thinner
+                    weight: 1.5, // Thin
                     opacity: 0.5,
                     interactive: false 
                 }).addTo(walkingLayer);
             });
         }
-        // Optional: Don't render walking nodes (dots) if too messy
-        // or render them tiny
         if (data.nodes) {
             data.nodes.forEach(n => {
                 L.circleMarker(n, {
-                    radius: 1, 
+                    radius: 2, // Small
                     color: '#3388ff',
                     fillOpacity: 0.5,
                     interactive: false
@@ -153,8 +150,7 @@ async function loadWalkingLayer() {
     finally { document.getElementById('loading').style.display = 'none'; }
 }
 
-
-// --- REST OF APP (Click, Route) ---
+// --- REST OF APP ---
 map.on('click', function(e) {
     var lat = e.latlng.lat.toFixed(5);
     var lng = e.latlng.lng.toFixed(5);
@@ -211,11 +207,25 @@ async function findRoute() {
         const data = await response.json();
 
         if (data.segments) {
+            // Draw Edges (Thick)
             data.segments.forEach(seg => {
                 L.polyline(seg.coords, {
                     color: seg.color, weight: 6, opacity: 1.0
                 }).addTo(routeLayer);
+                
+                // Draw Path Nodes (Big Dots) for highlighting
+                // Adding a dot at the start of every segment
+                if (seg.coords.length > 0) {
+                    L.circleMarker(seg.coords[0], {
+                        radius: 5,
+                        color: '#fff',
+                        fillColor: '#FFD700', // Gold color for path nodes
+                        fillOpacity: 1.0,
+                        weight: 2
+                    }).addTo(routeLayer);
+                }
             });
+            
             var allPoints = data.segments.flatMap(s => s.coords);
             if(allPoints.length > 0) map.fitBounds(L.polyline(allPoints).getBounds());
         }
