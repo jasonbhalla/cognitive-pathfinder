@@ -5,6 +5,8 @@ For example, some people dislike transit, but if going to downtown specifically,
 
 ![Cognitive Pathfinder Cover Image](images/cognitivepathfinder-cover.jpg)
 
+Note: This project is currently a Work In Progress! Right now, I'm focusing on integrating all the different transportation methods together as separate layers of one fused connected graph.
+
 ## Run the app
 
 1) Install dependencies from `requirements.txt`:
