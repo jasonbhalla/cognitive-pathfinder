@@ -8,6 +8,11 @@ import traceback
 from shapely import wkt
 from app.core.gtfs_loader import GTFSLoader
 
+# --- CONFIGURATION ---
+WALK_COLOR = '#3388ff'
+TRANSIT_COLOR = '#ff3333'
+TRANSFER_COLOR = '#000000'
+
 def get_fused_graph(city_name):
     # 1. Filenames
     safe_name = re.sub(r'[^a-zA-Z0-9]', '_', city_name.lower())
@@ -16,138 +21,161 @@ def get_fused_graph(city_name):
     
     G = None
 
-    # --- LOAD CACHED GRAPH ---
+    # --- ATTEMPT CACHE LOAD ---
     if os.path.exists(filename):
         print(f"[Graph] Loading cached fused graph: {filename}")
         try:
-            # Load with string IDs
             G = nx.read_graphml(filename, node_type=str)
         except Exception as e:
-            print(f"[Graph] Cache load failed ({e}). Rebuilding.")
+            print(f"[Graph] Cache corrupted ({e}). Rebuilding fresh.")
             G = None
 
-    # --- BUILD NEW GRAPH (If cache failed or missing) ---
+    # --- BUILD FROM SCRATCH ---
     if G is None:
-        print(f"[Graph] Cache missing. Downloading OSM Walk Graph for '{city_name}'...")
+        print(f"[Graph] Cache missing. Building Layers for '{city_name}'...")
+        
+        # === LAYER 1: WALKING (OSM) ===
         try:
+            print("[Layer: Walk] Downloading Street Network...")
             G = ox.graph_from_place(city_name, network_type='walk')
             
-            # Normalize OSM IDs to strings immediately (FIXED: Removed extra parenthesis)
+            # Standardize IDs to strings
             mapping = {n: str(n) for n in G.nodes()}
             G = nx.relabel_nodes(G, mapping)
             
-            print(f"[Graph] OSM Download Complete. Nodes: {len(G.nodes)}, Edges: {len(G.edges)}")
+            # STAMP THE LAYER
+            nx.set_node_attributes(G, 'walking', 'layer')
+            nx.set_edge_attributes(G, 'walking', 'layer')
+            nx.set_edge_attributes(G, WALK_COLOR, 'color')
             
-            # Tag defaults
-            for u, v, k, data in G.edges(keys=True, data=True):
-                data['mode'] = 'walking'
-                data['color'] = '#3388ff'
-
-            # --- GTFS FUSION ---
-            print(f"[Graph] Attempting GTFS Fusion for '{city_name}'...")
-            try:
-                loader = GTFSLoader(city_name)
-                loader.load_data()
-                
-                transit_edges = loader.get_transit_edges()
-                stops = loader.stops
-                
-                # A. Add Transit Nodes
-                stops['node_id'] = stops['stop_id'].apply(lambda x: f"transit_{x}")
-                existing_nodes = set(G.nodes)
-                
-                added_stops = 0
-                for _, stop in stops.iterrows():
-                    if stop['node_id'] not in existing_nodes:
-                        G.add_node(
-                            stop['node_id'],
-                            x=float(stop['lon']), 
-                            y=float(stop['lat']), 
-                            type='station',
-                            mode='transit'
-                        )
-                        added_stops += 1
-                print(f"[Fusion] Added {added_stops} Transit Stop Nodes.")
-
-                # B. Add Transit Edges
-                added_edges = 0
-                for edge in transit_edges:
-                    u = f"transit_{edge['stop_id']}"
-                    v = f"transit_{edge['next_stop_id']}"
-                    if u in G.nodes and v in G.nodes:
-                        G.add_edge(u, v, key=0, length=0, time=edge['duration'], mode='transit', color='#ff3333') 
-                        added_edges += 1
-                print(f"[Fusion] Added {added_edges} Transit Schedules (Edges).")
-
-                # C. Stitching
-                print("[Fusion] Stitching Transit Nodes to Street Network...")
-                osm_nodes_df = pd.DataFrame([
-                    {'id': n, 'x': float(data['x']), 'y': float(data['y'])} 
-                    for n, data in G.nodes(data=True) 
-                    if data.get('mode') != 'transit'
-                ])
-                
-                stitched_count = 0
-                if not osm_nodes_df.empty:
-                    tree = cKDTree(osm_nodes_df[['x', 'y']].values)
-                    stops_locs = stops[['lon', 'lat']].astype(float).values
-                    dists, idxs = tree.query(stops_locs, k=1)
-                    
-                    for i, (dist, idx) in enumerate(zip(dists, idxs)):
-                        if dist < 0.003: 
-                            transit_node = stops.iloc[i]['node_id']
-                            street_node = str(osm_nodes_df.iloc[idx]['id'])
-                            
-                            G.add_edge(street_node, transit_node, key=0, time=2.0, mode='transfer', color='#000000')
-                            G.add_edge(transit_node, street_node, key=0, time=2.0, mode='transfer', color='#000000')
-                            stitched_count += 1
-                            
-                print(f"[Fusion] Stitched {stitched_count} stops to nearby streets.")
-                
-            except FileNotFoundError:
-                print("[Fusion] No GTFS data found. Skipping fusion.")
-            except Exception as e:
-                print(f"[Fusion] CRITICAL FAILURE during fusion: {e}")
-                traceback.print_exc()
-                
-            print(f"[Graph] Saving to {filename}...")
-            ox.save_graphml(G, filename)
-            
+            print(f"[Layer: Walk] Built. Nodes: {len(G.nodes)}, Edges: {len(G.edges)}")
         except Exception as e:
-            print(f"[Graph] CRITICAL BUILD FAILED: {e}")
-            raise e
+            raise Exception(f"Failed to build Walking Layer: {e}")
+
+        # === LAYER 2: TRANSIT (GTFS) ===
+        print("[Layer: Transit] Integrating Public Transit...")
+        try:
+            loader = GTFSLoader(city_name)
+            loader.load_data()
+            stops = loader.stops
+            transit_edges = loader.get_transit_edges()
+            
+            # 1. Add Transit Nodes (Stations)
+            transit_nodes_added = 0
+            stops['node_id'] = stops['stop_id'].apply(lambda x: f"transit_{x}")
+            
+            # Use a dict for fast lookups during edge creation
+            stop_lookup = {} 
+            
+            for _, stop in stops.iterrows():
+                node_id = stop['node_id']
+                if node_id not in G:
+                    G.add_node(
+                        node_id,
+                        x=float(stop['lon']),
+                        y=float(stop['lat']),
+                        layer='transit',
+                        type='station'
+                    )
+                    transit_nodes_added += 1
+                stop_lookup[stop['stop_id']] = node_id
+            
+            print(f"[Layer: Transit] Added {transit_nodes_added} Station Nodes.")
+
+            # 2. Add Transit Edges (Tracks)
+            transit_edges_added = 0
+            for edge in transit_edges:
+                u = stop_lookup.get(edge['stop_id'])
+                v = stop_lookup.get(edge['next_stop_id'])
+                
+                if u and v and u in G and v in G:
+                    G.add_edge(
+                        u, v,
+                        key=0,
+                        layer='transit',
+                        time=float(edge['duration']),
+                        color=TRANSIT_COLOR
+                    )
+                    transit_edges_added += 1
+            
+            print(f"[Layer: Transit] Added {transit_edges_added} Transit Connections.")
+
+            # === LAYER 3: CONNECTORS (FUSION) ===
+            # Connect Layer 1 (Walk) to Layer 2 (Transit)
+            print("[Layer: Fusion] Stitching layers...")
+            
+            # Get Walking Nodes (Target)
+            walk_nodes = [
+                {'id': n, 'x': float(d['x']), 'y': float(d['y'])}
+                for n, d in G.nodes(data=True)
+                if d.get('layer') == 'walking'
+            ]
+            walk_df = pd.DataFrame(walk_nodes)
+            
+            # Get Transit Nodes (Source)
+            transit_node_list = [
+                {'id': n, 'x': float(d['x']), 'y': float(d['y'])}
+                for n, d in G.nodes(data=True)
+                if d.get('layer') == 'transit'
+            ]
+            
+            connections_made = 0
+            if not walk_df.empty and transit_node_list:
+                # Spatial Index for fast lookup
+                tree = cKDTree(walk_df[['x', 'y']].values)
+                
+                for t_node in transit_node_list:
+                    # Find nearest street node within 100 meters (approx 0.001 deg)
+                    dist, idx = tree.query([t_node['x'], t_node['y']], k=1)
+                    
+                    # 0.002 degrees is roughly ~200 meters. 
+                    # We want to be generous to ensure connectivity.
+                    if dist < 0.002: 
+                        w_node_id = walk_df.iloc[idx]['id']
+                        t_node_id = t_node['id']
+                        
+                        # Add Bi-Directional Transfer Edge
+                        G.add_edge(w_node_id, t_node_id, layer='connector', time=2.0, color=TRANSFER_COLOR)
+                        G.add_edge(t_node_id, w_node_id, layer='connector', time=2.0, color=TRANSFER_COLOR)
+                        connections_made += 1
+
+            print(f"[Layer: Fusion] Created {connections_made} Transfer Connections.")
+
+        except FileNotFoundError:
+            print("[Layer: Transit] No GTFS data found. Skipping layer.")
+        except Exception as e:
+            print(f"[Layer: Transit] Failed to integrate: {e}")
+            traceback.print_exc()
+
+        # Save to disk
+        print(f"[Graph] Serialization... Saving to {filename}")
+        ox.save_graphml(G, filename)
 
     # --- FINAL SANITIZATION ---
-    print("[Graph] Sanitizing data types (Nodes=Float, Edges=WKT/Float)...")
+    # We run this on EVERY load (cache or fresh) to ensure types are perfect.
+    print("[Graph] Validating Data Types...")
     
-    # 1. Force Node Coords to Float
+    # 1. Nodes: Coords must be floats
     for n, data in G.nodes(data=True):
         try:
-            if 'x' in data: data['x'] = float(data['x'])
-            if 'y' in data: data['y'] = float(data['y'])
-        except Exception:
-            pass 
+            data['x'] = float(data['x'])
+            data['y'] = float(data['y'])
+        except: pass
 
-    # 2. Force Edge Geometries AND Weights
+    # 2. Edges: Geometry must be Object, weights must be floats
     for u, v, data in G.edges(data=True):
-        # A. Hydrate WKT Geometries
+        # Fix weights
+        for weight_key in ['time', 'length']:
+            if weight_key in data:
+                try:
+                    data[weight_key] = float(data[weight_key])
+                except:
+                    data[weight_key] = 0.0
+        
+        # Fix geometry (WKT String -> Object)
         if 'geometry' in data and isinstance(data['geometry'], str):
             try:
                 data['geometry'] = wkt.loads(data['geometry'])
-            except Exception:
-                pass
-        
-        # B. Hydrate Numeric Weights (The fix for your crash)
-        if 'length' in data:
-            try:
-                data['length'] = float(data['length'])
-            except (ValueError, TypeError):
-                data['length'] = 0.0
-        
-        if 'time' in data:
-            try:
-                data['time'] = float(data['time'])
-            except (ValueError, TypeError):
-                data['time'] = 0.0
+            except: pass
 
     return G

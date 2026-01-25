@@ -4,7 +4,7 @@ import os
 import requests
 import traceback
 
-# UPDATED REGISTRY with working MTA link
+# Registry
 GTFS_REGISTRY = {
     "hoboken": "http://web.mta.info/developers/data/nyct/subway/google_transit.zip", 
     "new york": "http://web.mta.info/developers/data/nyct/subway/google_transit.zip",
@@ -54,7 +54,7 @@ class GTFSLoader:
     def load_data(self):
         has_data = self.download_data()
         if not has_data:
-            # Don't crash, just let the fusion logic handle the missing data gracefully
+            # If no transit data is available
             print("[GTFS] No data available. Routing will be walk-only.")
             return
 
@@ -81,7 +81,7 @@ class GTFSLoader:
                 self.stops = self.stops[['stop_id', 'stop_name', 'lat', 'lon']].copy()
                 self.stop_times = self.stop_times[['trip_id', 'stop_id', 'departure_time', 'stop_sequence', 'arrival_time']].copy()
                 
-                # Limit to 50k for performance
+                # Limiting to 50,000 for now
                 if len(self.stop_times) > 50000:
                     self.stop_times = self.stop_times.head(50000)
 

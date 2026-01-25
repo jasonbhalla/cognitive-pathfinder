@@ -1,3 +1,6 @@
+.DS_Store
+**/.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -186,3 +189,4 @@ data/processed/*
 !data/processed/.gitkeep
 app/.DS_Store
 app/.DS_Store
+data/.DS_Store

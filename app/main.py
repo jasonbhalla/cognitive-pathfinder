@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional, List, Set
+from typing import Optional, List, Dict
 from app.core.graph_builder import get_fused_graph
 from app.core.pathfinder import find_shortest_path, get_path_segments
 
@@ -19,10 +19,8 @@ app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
-# --- 1. THE LOG BUFFER ---
+# --- LOGGING SETUP ---
 LOG_BUFFER = collections.deque(maxlen=100)
-
-# --- 2. THE PRINT HIJACKER ---
 original_print = builtins.print
 
 def custom_print(*args, **kwargs):
@@ -34,152 +32,156 @@ def custom_print(*args, **kwargs):
             timestamp = datetime.now().strftime("%H:%M:%S")
             msg = f"{timestamp} - {msg}"
         LOG_BUFFER.append(msg)
-    except Exception:
-        pass
+    except: pass
 
 builtins.print = custom_print
 
 def log_event(message: str, level: str = "INFO"):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    formatted_msg = f"{timestamp} - [{level}] - {message}"
-    print(formatted_msg)
+    print(f"{datetime.now().strftime('%H:%M:%S')} - [{level}] - {message}")
 
-# --- 3. SILENCE UVICORN SPAM ---
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return record.getMessage().find("/api/logs") == -1
 
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
-# --- 4. EXCEPTION HANDLERS ---
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    body = await request.body()
-    error_msg = f"Validation Error on {request.url}: {exc.errors()}"
-    log_event(error_msg, "ERROR")
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    error_msg = f"Server Crash: {str(exc)}"
-    log_event(error_msg, "CRITICAL")
-    traceback.print_exc()
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
-
-# --- 5. DATA MODELS ---
+# --- DATA MODELS ---
 class BoundingBox(BaseModel):
     min_lat: float
     max_lat: float
     min_lon: float
     max_lon: float
 
-class GraphRequest(BaseModel):
+class LayerRequest(BaseModel):
     city: str
-    gtfs_file: Optional[str] = None
-    bounds: Optional[BoundingBox] = None 
+    bounds: Optional[BoundingBox] = None
 
 class RouteRequest(BaseModel):
     city: str
-    gtfs_file: Optional[str] = None
     start_lat: float
     start_lon: float
     end_lat: float
     end_lon: float
 
-# --- 6. NAN CLEANER ---
 def sanitize_json(data):
-    if isinstance(data, dict):
-        return {k: sanitize_json(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [sanitize_json(v) for v in data]
+    if isinstance(data, dict): return {k: sanitize_json(v) for k, v in data.items()}
+    elif isinstance(data, list): return [sanitize_json(v) for v in data]
     elif isinstance(data, float):
-        if math.isnan(data) or math.isinf(data):
-            return None
+        if math.isnan(data) or math.isinf(data): return None
     return data
 
-# --- 7. ENDPOINTS ---
+# --- ENDPOINTS ---
+
 @app.get("/api/logs")
 async def get_logs():
     return {"logs": list(LOG_BUFFER)}
 
-@app.post("/api/graph-data")
-def get_graph_geometry(request: GraphRequest):
-    log_event(f"GRAPH REQUEST: {request.city}")
+@app.post("/api/layers/transit")
+def get_transit_layer(request: LayerRequest):
+    """
+    Returns the COMPLETE Transit Layer.
+    We do NOT filter this by bounds. The user needs to see the whole system.
+    """
+    log_event(f"FETCH TRANSIT LAYER: {request.city}")
     try:
         graph = get_fused_graph(request.city)
         edges = []
         nodes = []
         
-        # 1. Calculate Buffered Bounds
-        if request.bounds:
-            lat_span = request.bounds.max_lat - request.bounds.min_lat
-            lon_span = request.bounds.max_lon - request.bounds.min_lon
-            buffer_lat = lat_span * 0.2
-            buffer_lon = lon_span * 0.2
-            
-            min_lat = request.bounds.min_lat - buffer_lat
-            max_lat = request.bounds.max_lat + buffer_lat
-            min_lon = request.bounds.min_lon - buffer_lon
-            max_lon = request.bounds.max_lon + buffer_lon
-        else:
-            min_lat, max_lat, min_lon, max_lon = -90, 90, -180, 180
-
-        active_node_ids = set()
-        
-        # 2. Filter Edges (Hard limit is okay here to prevent browser crash)
-        edge_limit = 20000 
-        count = 0
-
+        # Iterate ENTIRE graph, pick out only Transit & Connectors
         for u, v, data in graph.edges(data=True):
-            if count > edge_limit: break
+            layer = data.get('layer', 'walking')
             
-            # Get coordinates
-            try:
-                n1 = graph.nodes[u]
-                n2 = graph.nodes[v]
-                y1, x1 = float(n1.get('y', 0)), float(n1.get('x', 0))
-                y2, x2 = float(n2.get('y', 0)), float(n2.get('x', 0))
-            except KeyError:
-                continue 
+            # We want Transit lines AND the connectors to the street
+            if layer in ['transit', 'connector']:
+                coords = []
+                if 'geometry' in data:
+                    try: coords = [(p[1], p[0]) for p in data['geometry'].coords]
+                    except: pass
                 
-            # Visibility Check
-            u_visible = (min_lat < y1 < max_lat) and (min_lon < x1 < max_lon)
-            v_visible = (min_lat < y2 < max_lat) and (min_lon < x2 < max_lon)
+                if not coords:
+                    n1 = graph.nodes[u]
+                    n2 = graph.nodes[v]
+                    coords = [(n1['y'], n1['x']), (n2['y'], n2['x'])]
+                
+                edges.append({"coords": coords, "color": data.get('color', '#000')})
+                
+                # Add associated nodes
+                for node_id in [u, v]:
+                    n = graph.nodes[node_id]
+                    nodes.append([n['y'], n['x']])
+
+        log_event(f"Sending TRANSIT Layer: {len(edges)} edges.")
+        return sanitize_json({"edges": edges, "nodes": nodes})
+    except Exception as e:
+        log_event(f"Transit Layer Failed: {e}", "ERROR")
+        raise e
+
+@app.post("/api/layers/walking")
+def get_walking_layer(request: LayerRequest):
+    """
+    Returns the Walking Layer, strictly filtered by current VIEWPORT.
+    We return EVERYTHING in the viewport. No arbitrary limits.
+    """
+    if not request.bounds:
+        return {"edges": [], "nodes": []} # Don't load walking data without bounds
+
+    log_event(f"FETCH WALKING LAYER: {request.city}")
+    try:
+        graph = get_fused_graph(request.city)
+        edges = []
+        nodes = []
+        
+        # Buffer bounds by 10%
+        b = request.bounds
+        lat_buf = (b.max_lat - b.min_lat) * 0.1
+        lon_buf = (b.max_lon - b.min_lon) * 0.1
+        min_lat, max_lat = b.min_lat - lat_buf, b.max_lat + lat_buf
+        min_lon, max_lon = b.min_lon - lon_buf, b.max_lon + lon_buf
+        
+        # 1. Fast Node Filter
+        visible_nodes = set()
+        for n, data in graph.nodes(data=True):
+            if data.get('layer') == 'walking':
+                if min_lat < data['y'] < max_lat and min_lon < data['x'] < max_lon:
+                    visible_nodes.add(n)
+        
+        if not visible_nodes:
+            return {"edges": [], "nodes": []}
+
+        # 2. Extract Subgraph
+        # This gets ALL edges connecting these nodes.
+        subgraph = graph.subgraph(visible_nodes)
+        
+        # 3. Serialize
+        SAFETY_LIMIT = 40000 
+        
+        for u, v, data in subgraph.edges(data=True):
+            if len(edges) >= SAFETY_LIMIT: break
             
-            if not (u_visible or v_visible):
-                continue
-
-            # Add endpoints to active set
-            active_node_ids.add(u)
-            active_node_ids.add(v)
-
             coords = []
             if 'geometry' in data:
-                try:
-                    coords = [(p[1], p[0]) for p in data['geometry'].coords]
-                except AttributeError:
-                    coords = [(y1, x1), (y2, x2)]
-            else:
-                coords = [(y1, x1), (y2, x2)]
+                try: coords = [(p[1], p[0]) for p in data['geometry'].coords]
+                except: pass
             
-            edges.append({
-                "coords": coords,
-                "color": data.get('color', '#999')
-            })
-            count += 1
+            if not coords:
+                n1 = graph.nodes[u]
+                n2 = graph.nodes[v]
+                coords = [(n1['y'], n1['x']), (n2['y'], n2['x'])]
+            
+            edges.append({"coords": coords, "color": data.get('color', '#3388ff')})
+
+        # Add nodes for visual dots
+        for n in subgraph.nodes():
+            if len(nodes) >= 10000: break
+            d = graph.nodes[n]
+            nodes.append([d['y'], d['x']])
+
+        log_event(f"Sending WALKING Layer: {len(edges)} edges.")
+        return sanitize_json({"edges": edges, "nodes": nodes})
         
-        # 3. Fetch Nodes (NO LIMIT)
-        # FIX: We removed the limit here. If an edge is shown, its nodes MUST be shown.
-        for node_id in active_node_ids:
-            n_data = graph.nodes[node_id]
-            nodes.append([float(n_data.get('y')), float(n_data.get('x'))])
-
-        response_data = {"edges": edges, "nodes": nodes}
-        log_event(f"Sending {len(edges)} visible edges and {len(nodes)} connected nodes.")
-        return sanitize_json(response_data)
-
     except Exception as e:
-        log_event(f"Graph Data Failed: {e}", "ERROR")
+        log_event(f"Walking Layer Failed: {e}", "ERROR")
         raise e
 
 @app.post("/api/route")
@@ -187,29 +189,19 @@ def calculate_route(request: RouteRequest):
     log_event(f"ROUTE REQUEST: {request.start_lat},{request.start_lon} -> {request.end_lat},{request.end_lon}")
     try:
         graph = get_fused_graph(request.city)
+        start = (request.start_lat, request.start_lon)
+        end = (request.end_lat, request.end_lon)
         
-        start_coords = (request.start_lat, request.start_lon)
-        end_coords = (request.end_lat, request.end_lon)
+        path, time = find_shortest_path(graph, start, end)
         
-        path_nodes, total_time = find_shortest_path(graph, start_coords, end_coords)
-        
-        if not path_nodes:
-            log_event("Pathfinder returned None (No path found).", "WARNING")
-            raise HTTPException(status_code=404, detail="No path found between these points.")
+        if not path:
+            log_event("No path found.", "WARNING")
+            raise HTTPException(status_code=404, detail="No path found.")
             
-        segments = get_path_segments(graph, path_nodes)
-        
-        response_data = {
-            "segments": segments,
-            "time_minutes": total_time,
-            "node_count": len(path_nodes)
-        }
-        
-        safe_response = sanitize_json(response_data)
-        log_event(f"ROUTE SUCCESS. Sending response.")
-        return safe_response
+        segments = get_path_segments(graph, path)
+        return sanitize_json({"segments": segments, "time_minutes": time, "node_count": len(path)})
 
     except Exception as e:
-        log_event(f"Route Calculation Failed: {e}", "ERROR")
+        log_event(f"Route Failed: {e}", "ERROR")
         traceback.print_exc()
         raise e

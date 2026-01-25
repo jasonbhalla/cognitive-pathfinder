@@ -1,5 +1,43 @@
 import networkx as nx
-import osmnx as ox
+import numpy as np
+from scipy.spatial import cKDTree
+
+def get_nearest_node(graph, point, layer='walking'):
+    """
+    Finds the nearest node in a specific layer using a KDTree.
+    Bypasses osmnx to avoid integer casting errors with hybrid IDs.
+    
+    :param graph: The graph
+    :param point: Tuple (lat, lon)
+    :param layer: 'walking' or 'transit'
+    """
+    lat, lon = point
+    
+    # 1. Extract Candidate Nodes (Filter by layer)
+    # We only want to snap the user to the STREET grid, not the subway tracks.
+    candidates = [
+        (n, data['x'], data['y']) 
+        for n, data in graph.nodes(data=True) 
+        if data.get('layer') == layer
+    ]
+    
+    if not candidates:
+        raise Exception(f"No nodes found in layer '{layer}'")
+
+    # 2. Build Spatial Index (KDTree)
+    node_ids, xs, ys = zip(*candidates)
+    
+    # Stack coordinates for the tree (x=lon, y=lat)
+    tree_data = np.column_stack((xs, ys))
+    tree = cKDTree(tree_data)
+    
+    # 3. Query Nearest Point
+    # k=1 returns (distance, index)
+    dist, idx = tree.query([lon, lat], k=1)
+    
+    # 4. Return the ID
+    return node_ids[idx]
+
 
 def find_shortest_path(graph, start_coords, end_coords):
     """
@@ -10,19 +48,14 @@ def find_shortest_path(graph, start_coords, end_coords):
     :return: List of node IDs representing the path, Total Time (minutes).
     """
     try:
-        # 1. Find nearest nodes (returns Integer IDs from spatial index)
-        #    Note: ox.nearest_nodes expects (X, Y) which is (Lon, Lat)
-        orig_raw = ox.distance.nearest_nodes(graph, start_coords[1], start_coords[0])
-        dest_raw = ox.distance.nearest_nodes(graph, end_coords[1], end_coords[0])
+        # 1. Find nearest WALKING nodes using our robust function
+        orig = get_nearest_node(graph, start_coords, layer='walking')
+        dest = get_nearest_node(graph, end_coords, layer='walking')
         
-        # 2. CRITICAL FIX: Cast to String to match Graph keys
-        orig = str(orig_raw)
-        dest = str(dest_raw)
-        
-        # 3. Run Dijkstra
+        # 2. Run Dijkstra
         path_nodes = nx.shortest_path(graph, orig, dest, weight=get_weight)
         
-        # 4. Calculate Total Time
+        # 3. Calculate Total Time
         total_time = 0
         for i in range(len(path_nodes) - 1):
             u = path_nodes[i]
@@ -46,14 +79,14 @@ def get_weight(u, v, data):
     Custom weight function for Dijkstra.
     Returns TIME in minutes.
     """
-    mode = data.get('mode', 'walking')
+    mode = data.get('layer', 'walking') # Use 'layer' as mode fallback
     
     # 1. Transit Edge (Time is pre-calculated in GTFS)
     if mode == 'transit':
         return float(data.get('time', 0))
     
-    # 2. Transfer Edge (Fixed penalty)
-    if mode == 'transfer':
+    # 2. Transfer Edge (Fixed penalty for now)
+    if mode == 'connector':
         return float(data.get('time', 2.0))
         
     # 3. Walking Edge (Calculate time based on length)
@@ -88,7 +121,7 @@ def get_path_segments(graph, path_nodes):
             try:
                 coords = [(p[1], p[0]) for p in data['geometry'].coords]
             except AttributeError:
-                # Fallback if geometry is still a string (shouldn't happen with sanitizer)
+                # Fallback if geometry is still a string
                 n1 = graph.nodes[u]
                 n2 = graph.nodes[v]
                 coords = [(n1['y'], n1['x']), (n2['y'], n2['x'])]
@@ -98,10 +131,17 @@ def get_path_segments(graph, path_nodes):
             n2 = graph.nodes[v]
             coords = [(n1['y'], n1['x']), (n2['y'], n2['x'])]
             
+        # Color coding based on layer
+        color = '#3388ff' # Default Walk
+        layer = data.get('layer', 'walking')
+        
+        if layer == 'transit': color = '#ff3333'
+        elif layer == 'connector': color = '#000000'
+            
         segments.append({
             "coords": coords,
-            "color": data.get('color', '#3388ff'),
-            "mode": data.get('mode', 'walking')
+            "color": color,
+            "mode": layer
         })
         
     return segments
